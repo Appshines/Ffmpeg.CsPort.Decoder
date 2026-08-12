@@ -7,8 +7,8 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <RootNamespace>Ffmpeg.CsPort.Decoder</RootNamespace>
     <AssemblyName>Ffmpeg.CsPort.Decoder</AssemblyName>
-    <Title>Ffmpeg.CsPort.Decoder</Title>
-    <Description>Independent managed C# port of selected FFmpeg audio decoders, demuxers, transforms, and resampling code.</Description>
+    <Title>Ffmpeg.CsPort.Decoder optimized variant</Title>
+    <Description>Performance-optimized independent managed C# port of selected FFmpeg audio decoders, demuxers, transforms, and resampling code.</Description>
     <PackageLicenseExpression>LGPL-2.1-or-later AND MIT AND BSL-1.0</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageTags>ffmpeg;audio;decoder;demuxer;resampler;managed</PackageTags>

@@ -4,6 +4,26 @@
 
 The port is based on FFmpeg commit [`9b6c8969e05b4f0b29f0f85cd501be6b3e582e6b`](https://github.com/FFmpeg/FFmpeg/tree/9b6c8969e05b4f0b29f0f85cd501be6b3e582e6b), identified by the reference build as `n8.1.2-34-g9b6c8969e0-20260731`.
 
+This repository contains the performance-optimized implementation. It preserves the assembly identity and public contract of the original managed port and remains a bit-exact replacement for it.
+
+## Performance and validation
+
+The optimized implementation was benchmarked on Windows x64 with alternating isolated processes and stable-run medians. The additional v2 campaign improved representative steady-state throughput over the preceding optimized state as follows:
+
+| Codec | Additional v2 throughput | Approximate total throughput over the original baseline |
+|---|---:|---:|
+| FLAC | +15.63% | +19.75% |
+| AAC-LC | +8.18% | +20.65% |
+| MP3 | +2.88% to +4.95% | +13.22% to +13.50% |
+| Vorbis | +2.05% | +28.30% |
+| HE-AAC/PS | +0.83% | +26.83% |
+| Opus | +0.03% | +7.66% |
+| HE-AAC | -0.59% | +44.04% |
+
+The total figures combine the sequentially measured original-to-optimized and v2 throughput factors; they are not a weighted real-world workload average. Results depend on CPU, runtime, input and warm-up state. AVX2 acceleration is used only where supported, with the complete scalar path retained as a fallback.
+
+Correctness gates passed with 277/277 identical production-path PCM fingerprints and complete standard/optimized FFmpeg 8.1.2 conformance runs over 271 files. Both variants completed with zero deviations and the same 62 expected nonzero reference exits.
+
 ## License
 
 The combined library is distributed under the **GNU Lesser General Public License version 2.1 or later** (`LGPL-2.1-or-later`). It is not `LGPL-3.0-only`. Version 3 may be selected under the “or later” clause, but the upstream baseline and this port retain the more precise `LGPL-2.1-or-later` designation. Package metadata uses `LGPL-2.1-or-later AND MIT AND BSL-1.0` so the additional component licenses below remain visible.
