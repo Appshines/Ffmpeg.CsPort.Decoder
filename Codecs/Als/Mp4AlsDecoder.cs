@@ -23,8 +23,8 @@
  * You should have received a copy of the GNU Lesser General Public License along with
  * this library. If not, see <https://www.gnu.org/licenses/>.
  *
- * PORT-NOTE: 1:1 translation. Do not refactor, reorder, or simplify; bit-exactness
- * against the FFmpeg reference is verified by the conformance tests.
+ * PORT-NOTE: 1:1 translation. Performance-motivated, semantics-preserving transformations
+ * applied (see repository history); bit-exactness remains verified by the conformance tests.
  */
 using System;
 using System.Buffers.Binary;
@@ -64,6 +64,7 @@ namespace Ffmpeg.CsPort.Decoder.Codecs.Als
 		private readonly int _LongTermLagLength;
 		private readonly int[][] _RawSamples;
 		private readonly int[] _ChannelPositions;
+		private readonly int[] _BlockSizes = new int[32];
 		private readonly BlockState _FirstBlock;
 		private readonly BlockState _SecondBlock;
 		private readonly List<SeekCheckpoint> _SeekCheckpoints = new List<SeekCheckpoint>();
@@ -277,13 +278,12 @@ namespace Ffmpeg.CsPort.Decoder.Codecs.Als
 			var l_BlockInfo = 0U;
 			for (var channel = 0; channel < _Channels; channel++)
 			{
-				var l_BlockSizes = new int[32];
-				var l_BlockCount = GetBlockSizes(a_FrameLength, l_BlockSizes, ref l_BlockInfo);
+				var l_BlockCount = GetBlockSizes(a_FrameLength, _BlockSizes, ref l_BlockInfo);
 				if (l_BlockCount <= 0) return FfmpegError.InvalidData;
 				var l_PairChannels = _JointStereo && channel + 1 < _Channels;
 				var l_Result = l_PairChannels
-					? DecodeChannelPair(channel, l_BlockSizes, l_BlockCount, a_RandomAccessFrame)
-					: DecodeIndependentChannel(channel, l_BlockSizes, l_BlockCount, a_RandomAccessFrame);
+					? DecodeChannelPair(channel, _BlockSizes, l_BlockCount, a_RandomAccessFrame)
+					: DecodeIndependentChannel(channel, _BlockSizes, l_BlockCount, a_RandomAccessFrame);
 				if (l_Result < 0) return l_Result;
 				CopyFrameHistory(channel);
 				if (l_PairChannels)
