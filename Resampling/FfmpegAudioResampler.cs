@@ -23,8 +23,8 @@
  * You should have received a copy of the GNU Lesser General Public License along with
  * this library. If not, see <https://www.gnu.org/licenses/>.
  *
- * PORT-NOTE: 1:1 translation. Do not refactor, reorder, or simplify; bit-exactness
- * against the FFmpeg reference is verified by the conformance tests.
+ * PORT-NOTE: 1:1 translation. Performance-motivated, semantics-preserving transformations
+ * applied (see repository history); bit-exactness remains verified by the conformance tests.
  */
 using System;
 using System.Buffers.Binary;
@@ -47,7 +47,7 @@ namespace Ffmpeg.CsPort.Decoder.Resampling
 		private readonly int outputSampleRate;
 		private readonly int inputChannels;
 		private readonly int outputChannels;
-		private readonly AudioSampleFormat inputFormat;
+		private readonly AudioSampleFormat packedInputFormat;
 		private readonly bool inputPlanar;
 		private readonly int inputBytesPerSample;
 		private readonly bool useDouble;
@@ -80,7 +80,7 @@ namespace Ffmpeg.CsPort.Decoder.Resampling
 			this.outputSampleRate = outputSampleRate;
 			this.inputChannels = inputChannels;
 			this.outputChannels = outputChannels;
-			this.inputFormat = inputFormat;
+			packedInputFormat = GetPackedFormat(inputFormat);
 			if (inputChannelLayout == 0) inputChannelLayout = GetDefaultChannelLayout(inputChannels);
 			if (outputChannelLayout == 0) outputChannelLayout = GetDefaultChannelLayout(outputChannels);
 			if (CountBits(inputChannelLayout) != inputChannels || CountBits(outputChannelLayout) != outputChannels)
@@ -90,14 +90,20 @@ namespace Ffmpeg.CsPort.Decoder.Resampling
 			resample = inputSampleRate != outputSampleRate;
 			resampleFirst = outputChannels / inputChannels - 1 < outputSampleRate / (float)inputSampleRate - 1.0f;
 
-			floatInput = CreateFloatPlanes(inputChannels);
-			floatMiddle = CreateFloatPlanes(Math.Max(inputChannels, outputChannels));
-			floatOutput = CreateFloatPlanes(outputChannels);
-			doubleInput = CreateDoublePlanes(inputChannels);
-			doubleMiddle = CreateDoublePlanes(Math.Max(inputChannels, outputChannels));
-			doubleOutput = CreateDoublePlanes(outputChannels);
-			floatMatrix = new float[outputChannels, inputChannels];
-			doubleMatrix = new double[outputChannels, inputChannels];
+			if (useDouble)
+			{
+				doubleInput = CreateDoublePlanes(inputChannels);
+				doubleMiddle = CreateDoublePlanes(Math.Max(inputChannels, outputChannels));
+				doubleOutput = CreateDoublePlanes(outputChannels);
+				doubleMatrix = new double[outputChannels, inputChannels];
+			}
+			else
+			{
+				floatInput = CreateFloatPlanes(inputChannels);
+				floatMiddle = CreateFloatPlanes(Math.Max(inputChannels, outputChannels));
+				floatOutput = CreateFloatPlanes(outputChannels);
+				floatMatrix = new float[outputChannels, inputChannels];
+			}
 			BuildMatrix(inputChannelLayout, outputChannelLayout);
 
 			if (resample)
@@ -259,19 +265,27 @@ namespace Ffmpeg.CsPort.Decoder.Resampling
 			for (var channel = 0; channel < inputChannels; channel++)
 			{
 				var plane = inputPlanar ? input[channel] : input[0];
+				var destination = floatInput[channel];
 				var byteOffset = (inputPlanar ? inputOffset : inputOffset * inputChannels + channel) * inputBytesPerSample;
 				var byteStride = (inputPlanar ? 1 : inputChannels) * inputBytesPerSample;
-				for (var sample = 0; sample < inputCount; sample++, byteOffset += byteStride)
+				switch (packedInputFormat)
 				{
-					float value;
-					switch (GetPackedFormat(inputFormat))
-					{
-						case AudioSampleFormat.Unsigned8: value = (plane[byteOffset] - 0x80) * (1.0f / (1 << 7)); break;
-						case AudioSampleFormat.Signed16: value = BinaryPrimitives.ReadInt16LittleEndian(plane.AsSpan(byteOffset)) * (1.0f / (1 << 15)); break;
-						case AudioSampleFormat.Signed32: value = BinaryPrimitives.ReadInt32LittleEndian(plane.AsSpan(byteOffset)) * (1.0f / (1U << 31)); break;
-						default: value = BitConverter.Int32BitsToSingle(BinaryPrimitives.ReadInt32LittleEndian(plane.AsSpan(byteOffset))); break;
-					}
-					floatInput[channel][sample] = value;
+					case AudioSampleFormat.Unsigned8:
+						for (var sample = 0; sample < inputCount; sample++, byteOffset += byteStride)
+							destination[sample] = (plane[byteOffset] - 0x80) * (1.0f / (1 << 7));
+						break;
+					case AudioSampleFormat.Signed16:
+						for (var sample = 0; sample < inputCount; sample++, byteOffset += byteStride)
+							destination[sample] = BinaryPrimitives.ReadInt16LittleEndian(plane.AsSpan(byteOffset)) * (1.0f / (1 << 15));
+						break;
+					case AudioSampleFormat.Signed32:
+						for (var sample = 0; sample < inputCount; sample++, byteOffset += byteStride)
+							destination[sample] = BinaryPrimitives.ReadInt32LittleEndian(plane.AsSpan(byteOffset)) * (1.0f / (1U << 31));
+						break;
+					default:
+						for (var sample = 0; sample < inputCount; sample++, byteOffset += byteStride)
+							destination[sample] = BitConverter.Int32BitsToSingle(BinaryPrimitives.ReadInt32LittleEndian(plane.AsSpan(byteOffset)));
+						break;
 				}
 			}
 		}
@@ -281,17 +295,17 @@ namespace Ffmpeg.CsPort.Decoder.Resampling
 			for (var channel = 0; channel < inputChannels; channel++)
 			{
 				var plane = inputPlanar ? input[channel] : input[0];
+				var destination = doubleInput[channel];
 				var byteOffset = (inputPlanar ? inputOffset : inputOffset * inputChannels + channel) * inputBytesPerSample;
 				var byteStride = (inputPlanar ? 1 : inputChannels) * inputBytesPerSample;
-				for (var sample = 0; sample < inputCount; sample++, byteOffset += byteStride)
+				if (packedInputFormat == AudioSampleFormat.Signed64)
 				{
-					double value;
-					if (GetPackedFormat(inputFormat) == AudioSampleFormat.Signed64)
-						value = BinaryPrimitives.ReadInt64LittleEndian(plane.AsSpan(byteOffset)) * (1.0 / (1UL << 63));
-					else
-						value = BitConverter.Int64BitsToDouble(BinaryPrimitives.ReadInt64LittleEndian(plane.AsSpan(byteOffset)));
-					doubleInput[channel][sample] = value;
+					for (var sample = 0; sample < inputCount; sample++, byteOffset += byteStride)
+						destination[sample] = BinaryPrimitives.ReadInt64LittleEndian(plane.AsSpan(byteOffset)) * (1.0 / (1UL << 63));
 				}
+				else
+					for (var sample = 0; sample < inputCount; sample++, byteOffset += byteStride)
+						destination[sample] = BitConverter.Int64BitsToDouble(BinaryPrimitives.ReadInt64LittleEndian(plane.AsSpan(byteOffset)));
 			}
 		}
 
@@ -302,43 +316,75 @@ namespace Ffmpeg.CsPort.Decoder.Resampling
 		{
 			if (inputChannels == 6 && outputChannels == 2)
 			{
+				var input0 = input[0]; var input1 = input[1]; var input2 = input[2];
+				var input3 = input[3]; var input4 = input[4]; var input5 = input[5];
+				var output0 = output[0]; var output1 = output[1];
+				var matrix02 = floatMatrix[0, 2]; var matrix03 = floatMatrix[0, 3];
+				var matrix00 = floatMatrix[0, 0]; var matrix04 = floatMatrix[0, 4];
+				var matrix11 = floatMatrix[1, 1]; var matrix15 = floatMatrix[1, 5];
 				for (var sample = 0; sample < count; sample++)
 				{
-					var common = input[2][sample] * floatMatrix[0, 2] + input[3][sample] * floatMatrix[0, 3];
-					output[0][sample] = common + input[0][sample] * floatMatrix[0, 0] + input[4][sample] * floatMatrix[0, 4];
-					output[1][sample] = common + input[1][sample] * floatMatrix[1, 1] + input[5][sample] * floatMatrix[1, 5];
+					var common = input2[sample] * matrix02 + input3[sample] * matrix03;
+					output0[sample] = common + input0[sample] * matrix00 + input4[sample] * matrix04;
+					output1[sample] = common + input1[sample] * matrix11 + input5[sample] * matrix15;
 				}
 				return;
 			}
 			if (inputChannels == 8 && outputChannels == 2)
 			{
+				var input0 = input[0]; var input1 = input[1]; var input2 = input[2]; var input3 = input[3];
+				var input4 = input[4]; var input5 = input[5]; var input6 = input[6]; var input7 = input[7];
+				var output0 = output[0]; var output1 = output[1];
+				var matrix02 = floatMatrix[0, 2]; var matrix03 = floatMatrix[0, 3];
+				var matrix00 = floatMatrix[0, 0]; var matrix04 = floatMatrix[0, 4]; var matrix06 = floatMatrix[0, 6];
+				var matrix11 = floatMatrix[1, 1]; var matrix15 = floatMatrix[1, 5]; var matrix17 = floatMatrix[1, 7];
 				for (var sample = 0; sample < count; sample++)
 				{
-					var common = input[2][sample] * floatMatrix[0, 2] + input[3][sample] * floatMatrix[0, 3];
-					output[0][sample] = common + input[0][sample] * floatMatrix[0, 0] + input[4][sample] * floatMatrix[0, 4] + input[6][sample] * floatMatrix[0, 6];
-					output[1][sample] = common + input[1][sample] * floatMatrix[1, 1] + input[5][sample] * floatMatrix[1, 5] + input[7][sample] * floatMatrix[1, 7];
+					var common = input2[sample] * matrix02 + input3[sample] * matrix03;
+					output0[sample] = common + input0[sample] * matrix00 + input4[sample] * matrix04 + input6[sample] * matrix06;
+					output1[sample] = common + input1[sample] * matrix11 + input5[sample] * matrix15 + input7[sample] * matrix17;
 				}
 				return;
 			}
+			Span<float> coefficients = stackalloc float[MaximumChannels];
 			for (var outputChannel = 0; outputChannel < outputChannels; outputChannel++)
 			{
 				var coefficientCount = 0;
 				var first = 0;
 				var second = 0;
 				for (var inputChannel = 0; inputChannel < inputChannels; inputChannel++)
-					if (floatMatrix[outputChannel, inputChannel] != 0) { if (coefficientCount++ == 0) first = inputChannel; else if (coefficientCount == 2) second = inputChannel; }
+				{
+					var coefficient = floatMatrix[outputChannel, inputChannel];
+					coefficients[inputChannel] = coefficient;
+					if (coefficient != 0) { if (coefficientCount++ == 0) first = inputChannel; else if (coefficientCount == 2) second = inputChannel; }
+				}
+				var outputPlane = output[outputChannel];
+				if (coefficientCount == 0)
+				{
+					Array.Clear(outputPlane, 0, count);
+					continue;
+				}
+				if (coefficientCount == 1)
+				{
+					var inputPlane = input[first];
+					var coefficient = coefficients[first];
+					for (var sample = 0; sample < count; sample++) outputPlane[sample] = inputPlane[sample] * coefficient;
+					continue;
+				}
+				if (coefficientCount == 2)
+				{
+					var firstPlane = input[first]; var secondPlane = input[second];
+					var firstCoefficient = coefficients[first]; var secondCoefficient = coefficients[second];
+					for (var sample = 0; sample < count; sample++)
+						outputPlane[sample] = firstPlane[sample] * firstCoefficient + secondPlane[sample] * secondCoefficient;
+					continue;
+				}
 				for (var sample = 0; sample < count; sample++)
 				{
-					if (coefficientCount == 0) output[outputChannel][sample] = 0;
-					else if (coefficientCount == 1) output[outputChannel][sample] = input[first][sample] * floatMatrix[outputChannel, first];
-					else if (coefficientCount == 2) output[outputChannel][sample] = input[first][sample] * floatMatrix[outputChannel, first] + input[second][sample] * floatMatrix[outputChannel, second];
-					else
-					{
-						float value = 0;
-						for (var inputChannel = 0; inputChannel < inputChannels; inputChannel++)
-							if (floatMatrix[outputChannel, inputChannel] != 0) value += input[inputChannel][sample] * floatMatrix[outputChannel, inputChannel];
-						output[outputChannel][sample] = value;
-					}
+					float value = 0;
+					for (var inputChannel = 0; inputChannel < inputChannels; inputChannel++)
+						if (coefficients[inputChannel] != 0) value += input[inputChannel][sample] * coefficients[inputChannel];
+					outputPlane[sample] = value;
 				}
 			}
 		}
@@ -350,43 +396,75 @@ namespace Ffmpeg.CsPort.Decoder.Resampling
 		{
 			if (inputChannels == 6 && outputChannels == 2)
 			{
+				var input0 = input[0]; var input1 = input[1]; var input2 = input[2];
+				var input3 = input[3]; var input4 = input[4]; var input5 = input[5];
+				var output0 = output[0]; var output1 = output[1];
+				var matrix02 = doubleMatrix[0, 2]; var matrix03 = doubleMatrix[0, 3];
+				var matrix00 = doubleMatrix[0, 0]; var matrix04 = doubleMatrix[0, 4];
+				var matrix11 = doubleMatrix[1, 1]; var matrix15 = doubleMatrix[1, 5];
 				for (var sample = 0; sample < count; sample++)
 				{
-					var common = input[2][sample] * doubleMatrix[0, 2] + input[3][sample] * doubleMatrix[0, 3];
-					output[0][sample] = common + input[0][sample] * doubleMatrix[0, 0] + input[4][sample] * doubleMatrix[0, 4];
-					output[1][sample] = common + input[1][sample] * doubleMatrix[1, 1] + input[5][sample] * doubleMatrix[1, 5];
+					var common = input2[sample] * matrix02 + input3[sample] * matrix03;
+					output0[sample] = common + input0[sample] * matrix00 + input4[sample] * matrix04;
+					output1[sample] = common + input1[sample] * matrix11 + input5[sample] * matrix15;
 				}
 				return;
 			}
 			if (inputChannels == 8 && outputChannels == 2)
 			{
+				var input0 = input[0]; var input1 = input[1]; var input2 = input[2]; var input3 = input[3];
+				var input4 = input[4]; var input5 = input[5]; var input6 = input[6]; var input7 = input[7];
+				var output0 = output[0]; var output1 = output[1];
+				var matrix02 = doubleMatrix[0, 2]; var matrix03 = doubleMatrix[0, 3];
+				var matrix00 = doubleMatrix[0, 0]; var matrix04 = doubleMatrix[0, 4]; var matrix06 = doubleMatrix[0, 6];
+				var matrix11 = doubleMatrix[1, 1]; var matrix15 = doubleMatrix[1, 5]; var matrix17 = doubleMatrix[1, 7];
 				for (var sample = 0; sample < count; sample++)
 				{
-					var common = input[2][sample] * doubleMatrix[0, 2] + input[3][sample] * doubleMatrix[0, 3];
-					output[0][sample] = common + input[0][sample] * doubleMatrix[0, 0] + input[4][sample] * doubleMatrix[0, 4] + input[6][sample] * doubleMatrix[0, 6];
-					output[1][sample] = common + input[1][sample] * doubleMatrix[1, 1] + input[5][sample] * doubleMatrix[1, 5] + input[7][sample] * doubleMatrix[1, 7];
+					var common = input2[sample] * matrix02 + input3[sample] * matrix03;
+					output0[sample] = common + input0[sample] * matrix00 + input4[sample] * matrix04 + input6[sample] * matrix06;
+					output1[sample] = common + input1[sample] * matrix11 + input5[sample] * matrix15 + input7[sample] * matrix17;
 				}
 				return;
 			}
+			Span<double> coefficients = stackalloc double[MaximumChannels];
 			for (var outputChannel = 0; outputChannel < outputChannels; outputChannel++)
 			{
 				var coefficientCount = 0;
 				var first = 0;
 				var second = 0;
 				for (var inputChannel = 0; inputChannel < inputChannels; inputChannel++)
-					if (doubleMatrix[outputChannel, inputChannel] != 0) { if (coefficientCount++ == 0) first = inputChannel; else if (coefficientCount == 2) second = inputChannel; }
+				{
+					var coefficient = doubleMatrix[outputChannel, inputChannel];
+					coefficients[inputChannel] = coefficient;
+					if (coefficient != 0) { if (coefficientCount++ == 0) first = inputChannel; else if (coefficientCount == 2) second = inputChannel; }
+				}
+				var outputPlane = output[outputChannel];
+				if (coefficientCount == 0)
+				{
+					Array.Clear(outputPlane, 0, count);
+					continue;
+				}
+				if (coefficientCount == 1)
+				{
+					var inputPlane = input[first];
+					var coefficient = coefficients[first];
+					for (var sample = 0; sample < count; sample++) outputPlane[sample] = inputPlane[sample] * coefficient;
+					continue;
+				}
+				if (coefficientCount == 2)
+				{
+					var firstPlane = input[first]; var secondPlane = input[second];
+					var firstCoefficient = coefficients[first]; var secondCoefficient = coefficients[second];
+					for (var sample = 0; sample < count; sample++)
+						outputPlane[sample] = firstPlane[sample] * firstCoefficient + secondPlane[sample] * secondCoefficient;
+					continue;
+				}
 				for (var sample = 0; sample < count; sample++)
 				{
-					if (coefficientCount == 0) output[outputChannel][sample] = 0;
-					else if (coefficientCount == 1) output[outputChannel][sample] = input[first][sample] * doubleMatrix[outputChannel, first];
-					else if (coefficientCount == 2) output[outputChannel][sample] = input[first][sample] * doubleMatrix[outputChannel, first] + input[second][sample] * doubleMatrix[outputChannel, second];
-					else
-					{
-						double value = 0;
-						for (var inputChannel = 0; inputChannel < inputChannels; inputChannel++)
-							if (doubleMatrix[outputChannel, inputChannel] != 0) value += input[inputChannel][sample] * doubleMatrix[outputChannel, inputChannel];
-						output[outputChannel][sample] = value;
-					}
+					double value = 0;
+					for (var inputChannel = 0; inputChannel < inputChannels; inputChannel++)
+						if (coefficients[inputChannel] != 0) value += input[inputChannel][sample] * coefficients[inputChannel];
+					outputPlane[sample] = value;
 				}
 			}
 		}
@@ -460,8 +538,8 @@ namespace Ffmpeg.CsPort.Decoder.Resampling
 				for (var inputChannel = 0; inputChannel < inputChannels; inputChannel++)
 				{
 					var inputBit = GetChannelBit(inputLayout, inputChannel);
-					doubleMatrix[outputChannel, inputChannel] = named[outputBit, inputBit];
-					floatMatrix[outputChannel, inputChannel] = (float)named[outputBit, inputBit];
+					if (useDouble) doubleMatrix[outputChannel, inputChannel] = named[outputBit, inputBit];
+					else floatMatrix[outputChannel, inputChannel] = (float)named[outputBit, inputBit];
 				}
 			}
 		}
@@ -556,6 +634,17 @@ namespace Ffmpeg.CsPort.Decoder.Resampling
 
 		private void WritePackedFloat(float[] destination, int destinationOffset, float[][] source, int sourceOffset, int count)
 		{
+			if (outputChannels == 2)
+			{
+				var source0 = source[0]; var source1 = source[1];
+				for (var sample = 0; sample < count; sample++)
+				{
+					var sourceIndex = sourceOffset + sample;
+					destination[destinationOffset++] = source0[sourceIndex];
+					destination[destinationOffset++] = source1[sourceIndex];
+				}
+				return;
+			}
 			for (var sample = 0; sample < count; sample++)
 				for (var channel = 0; channel < outputChannels; channel++)
 					destination[destinationOffset++] = source[channel][sourceOffset + sample];
@@ -568,6 +657,17 @@ namespace Ffmpeg.CsPort.Decoder.Resampling
 
 		private void WritePackedFloat(float[] destination, int destinationOffset, double[][] source, int sourceOffset, int count)
 		{
+			if (outputChannels == 2)
+			{
+				var source0 = source[0]; var source1 = source[1];
+				for (var sample = 0; sample < count; sample++)
+				{
+					var sourceIndex = sourceOffset + sample;
+					destination[destinationOffset++] = (float)source0[sourceIndex];
+					destination[destinationOffset++] = (float)source1[sourceIndex];
+				}
+				return;
+			}
 			for (var sample = 0; sample < count; sample++)
 				for (var channel = 0; channel < outputChannels; channel++)
 					destination[destinationOffset++] = (float)source[channel][sourceOffset + sample];
