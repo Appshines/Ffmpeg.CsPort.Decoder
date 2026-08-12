@@ -23,8 +23,8 @@
  * You should have received a copy of the GNU Lesser General Public License along with
  * this library. If not, see <https://www.gnu.org/licenses/>.
  *
- * PORT-NOTE: 1:1 translation. Do not refactor, reorder, or simplify; bit-exactness
- * against the FFmpeg reference is verified by the conformance tests.
+ * PORT-NOTE: 1:1 translation. Performance-motivated, semantics-preserving transformations
+ * applied (see repository history); bit-exactness remains verified by the conformance tests.
  */
 using System;
 
@@ -44,7 +44,7 @@ namespace Ffmpeg.CsPort.Decoder.Codecs.Aac
 		private static readonly int[] ShortDelayBand = { 42, 62 };
 
 		/// <summary>Transforms one SBR QMF frame to PS hybrid bands, creates the stereo image, and writes both QMF channels back.</summary>
-		public static void Apply(AacParametricStereo ps, float[,,,] output, int top)
+		public static void Apply(AacParametricStereo ps, float[] output, int top)
 		{
 			var is34 = ps.Common.Is34Bands ? 1 : 0;
 			top += HybridBands[is34] - 64;
@@ -58,14 +58,15 @@ namespace Ffmpeg.CsPort.Decoder.Codecs.Aac
 		}
 
 		/// <summary>Splits the first five QMF bands into the 20- or 34-band PS hybrid layout and interleaves remaining QMF bands.</summary>
-		private static void HybridAnalysis(AacParametricStereo ps, float[,,,] output, bool is34)
+		private static void HybridAnalysis(AacParametricStereo ps, float[] output, bool is34)
 		{
 			for (var qmf = 0; qmf < 5; qmf++)
 			{
 				for (var time = 0; time < 38; time++)
 				{
-					ps.InputBuffer[qmf, time + 6, 0] = output[0, 0, time, qmf];
-					ps.InputBuffer[qmf, time + 6, 1] = output[0, 1, time, qmf];
+					var outputIndex = time * AacSpectralBandReplication.OutputTimeStride + qmf;
+					ps.InputBuffer[qmf, time + 6, 0] = output[outputIndex];
+					ps.InputBuffer[qmf, time + 6, 1] = output[outputIndex + AacSpectralBandReplication.OutputComponentStride];
 				}
 			}
 
@@ -80,8 +81,9 @@ namespace Ffmpeg.CsPort.Decoder.Codecs.Aac
 				{
 					for (var time = 0; time < 32; time++)
 					{
-						ps.LeftBuffer[27 + qmf, time, 0] = output[0, 0, time, qmf];
-						ps.LeftBuffer[27 + qmf, time, 1] = output[0, 1, time, qmf];
+						var outputIndex = time * AacSpectralBandReplication.OutputTimeStride + qmf;
+						ps.LeftBuffer[27 + qmf, time, 0] = output[outputIndex];
+						ps.LeftBuffer[27 + qmf, time, 1] = output[outputIndex + AacSpectralBandReplication.OutputComponentStride];
 					}
 				}
 			} else
@@ -93,8 +95,9 @@ namespace Ffmpeg.CsPort.Decoder.Codecs.Aac
 				{
 					for (var time = 0; time < 32; time++)
 					{
-						ps.LeftBuffer[7 + qmf, time, 0] = output[0, 0, time, qmf];
-						ps.LeftBuffer[7 + qmf, time, 1] = output[0, 1, time, qmf];
+						var outputIndex = time * AacSpectralBandReplication.OutputTimeStride + qmf;
+						ps.LeftBuffer[7 + qmf, time, 0] = output[outputIndex];
+						ps.LeftBuffer[7 + qmf, time, 1] = output[outputIndex + AacSpectralBandReplication.OutputComponentStride];
 					}
 				}
 			}
@@ -241,32 +244,41 @@ namespace Ffmpeg.CsPort.Decoder.Codecs.Aac
 		}
 
 		/// <summary>Recombines PS hybrid subbands into the two 64-band complex QMF channel matrices.</summary>
-		private static void HybridSynthesis(AacParametricStereo ps, float[,,,] output, bool is34)
+		private static void HybridSynthesis(AacParametricStereo ps, float[] output, bool is34)
 		{
 			if (is34)
 			{
 				for (var time = 0; time < 32; time++)
 				{
+					var leftReal = output.AsSpan(time * AacSpectralBandReplication.OutputTimeStride,
+						AacSpectralBandReplication.OutputTimeStride);
+					var leftImaginary = output.AsSpan(AacSpectralBandReplication.OutputComponentStride +
+						time * AacSpectralBandReplication.OutputTimeStride, AacSpectralBandReplication.OutputTimeStride);
+					var rightReal = output.AsSpan(AacSpectralBandReplication.OutputChannelStride +
+						time * AacSpectralBandReplication.OutputTimeStride, AacSpectralBandReplication.OutputTimeStride);
+					var rightImaginary = output.AsSpan(AacSpectralBandReplication.OutputChannelStride +
+						AacSpectralBandReplication.OutputComponentStride + time * AacSpectralBandReplication.OutputTimeStride,
+						AacSpectralBandReplication.OutputTimeStride);
 					for (var qmf = 0; qmf < 5; qmf++)
 					{
-						output[0, 0, time, qmf] = 0.0f;
-						output[0, 1, time, qmf] = 0.0f;
-						output[1, 0, time, qmf] = 0.0f;
-						output[1, 1, time, qmf] = 0.0f;
+						leftReal[qmf] = 0.0f;
+						leftImaginary[qmf] = 0.0f;
+						rightReal[qmf] = 0.0f;
+						rightImaginary[qmf] = 0.0f;
 					}
 					for (var band = 0; band < 12; band++)
 					{
-						output[0, 0, time, 0] += ps.LeftBuffer[band, time, 0];
-						output[0, 1, time, 0] += ps.LeftBuffer[band, time, 1];
-						output[1, 0, time, 0] += ps.RightBuffer[band, time, 0];
-						output[1, 1, time, 0] += ps.RightBuffer[band, time, 1];
+						leftReal[0] += ps.LeftBuffer[band, time, 0];
+						leftImaginary[0] += ps.LeftBuffer[band, time, 1];
+						rightReal[0] += ps.RightBuffer[band, time, 0];
+						rightImaginary[0] += ps.RightBuffer[band, time, 1];
 					}
 					for (var band = 0; band < 8; band++)
 					{
-						output[0, 0, time, 1] += ps.LeftBuffer[12 + band, time, 0];
-						output[0, 1, time, 1] += ps.LeftBuffer[12 + band, time, 1];
-						output[1, 0, time, 1] += ps.RightBuffer[12 + band, time, 0];
-						output[1, 1, time, 1] += ps.RightBuffer[12 + band, time, 1];
+						leftReal[1] += ps.LeftBuffer[12 + band, time, 0];
+						leftImaginary[1] += ps.LeftBuffer[12 + band, time, 1];
+						rightReal[1] += ps.RightBuffer[12 + band, time, 0];
+						rightImaginary[1] += ps.RightBuffer[12 + band, time, 1];
 					}
 					for (var band = 0; band < 4; band++)
 					{
@@ -280,45 +292,58 @@ namespace Ffmpeg.CsPort.Decoder.Codecs.Aac
 			{
 				for (var time = 0; time < 32; time++)
 				{
-					output[0, 0, time, 0] = ps.LeftBuffer[0, time, 0] + ps.LeftBuffer[1, time, 0] +
+					var leftReal = output.AsSpan(time * AacSpectralBandReplication.OutputTimeStride,
+						AacSpectralBandReplication.OutputTimeStride);
+					var leftImaginary = output.AsSpan(AacSpectralBandReplication.OutputComponentStride +
+						time * AacSpectralBandReplication.OutputTimeStride, AacSpectralBandReplication.OutputTimeStride);
+					var rightReal = output.AsSpan(AacSpectralBandReplication.OutputChannelStride +
+						time * AacSpectralBandReplication.OutputTimeStride, AacSpectralBandReplication.OutputTimeStride);
+					var rightImaginary = output.AsSpan(AacSpectralBandReplication.OutputChannelStride +
+						AacSpectralBandReplication.OutputComponentStride + time * AacSpectralBandReplication.OutputTimeStride,
+						AacSpectralBandReplication.OutputTimeStride);
+					leftReal[0] = ps.LeftBuffer[0, time, 0] + ps.LeftBuffer[1, time, 0] +
 						ps.LeftBuffer[2, time, 0] + ps.LeftBuffer[3, time, 0] + ps.LeftBuffer[4, time, 0] + ps.LeftBuffer[5, time, 0];
-					output[0, 1, time, 0] = ps.LeftBuffer[0, time, 1] + ps.LeftBuffer[1, time, 1] +
+					leftImaginary[0] = ps.LeftBuffer[0, time, 1] + ps.LeftBuffer[1, time, 1] +
 						ps.LeftBuffer[2, time, 1] + ps.LeftBuffer[3, time, 1] + ps.LeftBuffer[4, time, 1] + ps.LeftBuffer[5, time, 1];
-					output[1, 0, time, 0] = ps.RightBuffer[0, time, 0] + ps.RightBuffer[1, time, 0] +
+					rightReal[0] = ps.RightBuffer[0, time, 0] + ps.RightBuffer[1, time, 0] +
 						ps.RightBuffer[2, time, 0] + ps.RightBuffer[3, time, 0] + ps.RightBuffer[4, time, 0] + ps.RightBuffer[5, time, 0];
-					output[1, 1, time, 0] = ps.RightBuffer[0, time, 1] + ps.RightBuffer[1, time, 1] +
+					rightImaginary[0] = ps.RightBuffer[0, time, 1] + ps.RightBuffer[1, time, 1] +
 						ps.RightBuffer[2, time, 1] + ps.RightBuffer[3, time, 1] + ps.RightBuffer[4, time, 1] + ps.RightBuffer[5, time, 1];
-					output[0, 0, time, 1] = ps.LeftBuffer[6, time, 0] + ps.LeftBuffer[7, time, 0];
-					output[0, 1, time, 1] = ps.LeftBuffer[6, time, 1] + ps.LeftBuffer[7, time, 1];
-					output[1, 0, time, 1] = ps.RightBuffer[6, time, 0] + ps.RightBuffer[7, time, 0];
-					output[1, 1, time, 1] = ps.RightBuffer[6, time, 1] + ps.RightBuffer[7, time, 1];
-					output[0, 0, time, 2] = ps.LeftBuffer[8, time, 0] + ps.LeftBuffer[9, time, 0];
-					output[0, 1, time, 2] = ps.LeftBuffer[8, time, 1] + ps.LeftBuffer[9, time, 1];
-					output[1, 0, time, 2] = ps.RightBuffer[8, time, 0] + ps.RightBuffer[9, time, 0];
-					output[1, 1, time, 2] = ps.RightBuffer[8, time, 1] + ps.RightBuffer[9, time, 1];
+					leftReal[1] = ps.LeftBuffer[6, time, 0] + ps.LeftBuffer[7, time, 0];
+					leftImaginary[1] = ps.LeftBuffer[6, time, 1] + ps.LeftBuffer[7, time, 1];
+					rightReal[1] = ps.RightBuffer[6, time, 0] + ps.RightBuffer[7, time, 0];
+					rightImaginary[1] = ps.RightBuffer[6, time, 1] + ps.RightBuffer[7, time, 1];
+					leftReal[2] = ps.LeftBuffer[8, time, 0] + ps.LeftBuffer[9, time, 0];
+					leftImaginary[2] = ps.LeftBuffer[8, time, 1] + ps.LeftBuffer[9, time, 1];
+					rightReal[2] = ps.RightBuffer[8, time, 0] + ps.RightBuffer[9, time, 0];
+					rightImaginary[2] = ps.RightBuffer[8, time, 1] + ps.RightBuffer[9, time, 1];
 				}
 				Deinterleave(output, ps, 7, 3);
 			}
 		}
 
-		private static void AddHybrid(float[,,,] output, AacParametricStereo ps, int time, int qmf, int band)
+		private static void AddHybrid(float[] output, AacParametricStereo ps, int time, int qmf, int band)
 		{
-			output[0, 0, time, qmf] += ps.LeftBuffer[band, time, 0];
-			output[0, 1, time, qmf] += ps.LeftBuffer[band, time, 1];
-			output[1, 0, time, qmf] += ps.RightBuffer[band, time, 0];
-			output[1, 1, time, qmf] += ps.RightBuffer[band, time, 1];
+			var outputIndex = time * AacSpectralBandReplication.OutputTimeStride + qmf;
+			output[outputIndex] += ps.LeftBuffer[band, time, 0];
+			output[outputIndex + AacSpectralBandReplication.OutputComponentStride] += ps.LeftBuffer[band, time, 1];
+			output[outputIndex + AacSpectralBandReplication.OutputChannelStride] += ps.RightBuffer[band, time, 0];
+			output[outputIndex + AacSpectralBandReplication.OutputChannelStride + AacSpectralBandReplication.OutputComponentStride] +=
+				ps.RightBuffer[band, time, 1];
 		}
 
-		private static void Deinterleave(float[,,,] output, AacParametricStereo ps, int inputBase, int firstQmf)
+		private static void Deinterleave(float[] output, AacParametricStereo ps, int inputBase, int firstQmf)
 		{
 			for (var qmf = firstQmf; qmf < 64; qmf++)
 			{
 				for (var time = 0; time < 32; time++)
 				{
-					output[0, 0, time, qmf] = ps.LeftBuffer[inputBase + qmf, time, 0];
-					output[0, 1, time, qmf] = ps.LeftBuffer[inputBase + qmf, time, 1];
-					output[1, 0, time, qmf] = ps.RightBuffer[inputBase + qmf, time, 0];
-					output[1, 1, time, qmf] = ps.RightBuffer[inputBase + qmf, time, 1];
+					var outputIndex = time * AacSpectralBandReplication.OutputTimeStride + qmf;
+					output[outputIndex] = ps.LeftBuffer[inputBase + qmf, time, 0];
+					output[outputIndex + AacSpectralBandReplication.OutputComponentStride] = ps.LeftBuffer[inputBase + qmf, time, 1];
+					output[outputIndex + AacSpectralBandReplication.OutputChannelStride] = ps.RightBuffer[inputBase + qmf, time, 0];
+					output[outputIndex + AacSpectralBandReplication.OutputChannelStride + AacSpectralBandReplication.OutputComponentStride] =
+						ps.RightBuffer[inputBase + qmf, time, 1];
 				}
 			}
 		}

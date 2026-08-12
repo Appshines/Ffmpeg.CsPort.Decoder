@@ -23,8 +23,8 @@
  * You should have received a copy of the GNU Lesser General Public License along with
  * this library. If not, see <https://www.gnu.org/licenses/>.
  *
- * PORT-NOTE: 1:1 translation. Do not refactor, reorder, or simplify; bit-exactness
- * against the FFmpeg reference is verified by the conformance tests.
+ * PORT-NOTE: 1:1 translation. Performance-motivated, semantics-preserving transformations
+ * applied (see repository history); bit-exactness remains verified by the conformance tests.
  */
 using System;
 
@@ -126,21 +126,33 @@ namespace Ffmpeg.CsPort.Decoder.Codecs.Aac
 		private static void GenerateLowFrequency(AacSpectralBandReplication sbr, AacSbrData data)
 		{
 			Array.Clear(sbr.Low, 0, sbr.Low.Length);
+			var currentAnalysisOffset = data.AnalysisPosition * AacSbrData.AnalysisPositionStride;
 			for (var band = 0; band < sbr.Crossover[1]; band++)
 			{
+				var lowRow = sbr.Low.AsSpan(band * AacSpectralBandReplication.LowBandStride,
+					AacSpectralBandReplication.LowBandStride);
+				var analysisBandOffset = currentAnalysisOffset + band * AacSbrData.AnalysisBandStride;
 				for (var time = 8; time < 40; time++)
 				{
-					sbr.Low[band, time, 0] = data.Analysis[data.AnalysisPosition, time - 8, band, 0];
-					sbr.Low[band, time, 1] = data.Analysis[data.AnalysisPosition, time - 8, band, 1];
+					var lowIndex = time * AacSpectralBandReplication.LowTimeStride;
+					var analysisIndex = analysisBandOffset + (time - 8) * AacSbrData.AnalysisSlotStride;
+					lowRow[lowIndex] = data.Analysis[analysisIndex];
+					lowRow[lowIndex + 1] = data.Analysis[analysisIndex + 1];
 				}
 			}
 			var previousPosition = 1 - data.AnalysisPosition;
+			var previousAnalysisOffset = previousPosition * AacSbrData.AnalysisPositionStride;
 			for (var band = 0; band < sbr.Crossover[0]; band++)
 			{
+				var lowRow = sbr.Low.AsSpan(band * AacSpectralBandReplication.LowBandStride,
+					AacSpectralBandReplication.LowBandStride);
+				var analysisBandOffset = previousAnalysisOffset + band * AacSbrData.AnalysisBandStride;
 				for (var time = 0; time < 8; time++)
 				{
-					sbr.Low[band, time, 0] = data.Analysis[previousPosition, time + 24, band, 0];
-					sbr.Low[band, time, 1] = data.Analysis[previousPosition, time + 24, band, 1];
+					var lowIndex = time * AacSpectralBandReplication.LowTimeStride;
+					var analysisIndex = analysisBandOffset + (time + 24) * AacSbrData.AnalysisSlotStride;
+					lowRow[lowIndex] = data.Analysis[analysisIndex];
+					lowRow[lowIndex + 1] = data.Analysis[analysisIndex + 1];
 				}
 			}
 		}
@@ -154,33 +166,41 @@ namespace Ffmpeg.CsPort.Decoder.Codecs.Aac
 			for (var band = 0; band < sbr.K[0]; band++)
 			{
 				AacSbrDsp.Autocorrelate(sbr.Low, band, correlation);
-				var denominator = correlation[2, 1, 0] * correlation[1, 0, 0] -
-					(correlation[1, 1, 0] * correlation[1, 1, 0] + correlation[1, 1, 1] * correlation[1, 1, 1]) / 1.000001f;
+				var denominator = correlation[2 * AacSpectralBandReplication.CorrelationFirstStride + AacSpectralBandReplication.CorrelationSecondStride] *
+					correlation[AacSpectralBandReplication.CorrelationFirstStride] -
+					(correlation[AacSpectralBandReplication.CorrelationFirstStride + AacSpectralBandReplication.CorrelationSecondStride] *
+					correlation[AacSpectralBandReplication.CorrelationFirstStride + AacSpectralBandReplication.CorrelationSecondStride] +
+					correlation[AacSpectralBandReplication.CorrelationFirstStride + AacSpectralBandReplication.CorrelationSecondStride + 1] *
+					correlation[AacSpectralBandReplication.CorrelationFirstStride + AacSpectralBandReplication.CorrelationSecondStride + 1]) / 1.000001f;
 				if (denominator == 0.0f)
 				{
 					sbr.Alpha1[band, 0] = 0.0f;
 					sbr.Alpha1[band, 1] = 0.0f;
 				} else
 				{
-					var real = correlation[0, 0, 0] * correlation[1, 1, 0] -
-						correlation[0, 0, 1] * correlation[1, 1, 1] - correlation[0, 1, 0] * correlation[1, 0, 0];
-					var imaginary = correlation[0, 0, 0] * correlation[1, 1, 1] +
-						correlation[0, 0, 1] * correlation[1, 1, 0] - correlation[0, 1, 1] * correlation[1, 0, 0];
+					var real = correlation[0] * correlation[AacSpectralBandReplication.CorrelationFirstStride + AacSpectralBandReplication.CorrelationSecondStride] -
+						correlation[1] * correlation[AacSpectralBandReplication.CorrelationFirstStride + AacSpectralBandReplication.CorrelationSecondStride + 1] -
+						correlation[AacSpectralBandReplication.CorrelationSecondStride] * correlation[AacSpectralBandReplication.CorrelationFirstStride];
+					var imaginary = correlation[0] * correlation[AacSpectralBandReplication.CorrelationFirstStride + AacSpectralBandReplication.CorrelationSecondStride + 1] +
+						correlation[1] * correlation[AacSpectralBandReplication.CorrelationFirstStride + AacSpectralBandReplication.CorrelationSecondStride] -
+						correlation[AacSpectralBandReplication.CorrelationSecondStride + 1] * correlation[AacSpectralBandReplication.CorrelationFirstStride];
 					sbr.Alpha1[band, 0] = real / denominator;
 					sbr.Alpha1[band, 1] = imaginary / denominator;
 				}
-				if (correlation[1, 0, 0] == 0.0f)
+				if (correlation[AacSpectralBandReplication.CorrelationFirstStride] == 0.0f)
 				{
 					sbr.Alpha0[band, 0] = 0.0f;
 					sbr.Alpha0[band, 1] = 0.0f;
 				} else
 				{
-					var real = correlation[0, 0, 0] + sbr.Alpha1[band, 0] * correlation[1, 1, 0] +
-						sbr.Alpha1[band, 1] * correlation[1, 1, 1];
-					var imaginary = correlation[0, 0, 1] + sbr.Alpha1[band, 1] * correlation[1, 1, 0] -
-						sbr.Alpha1[band, 0] * correlation[1, 1, 1];
-					sbr.Alpha0[band, 0] = -real / correlation[1, 0, 0];
-					sbr.Alpha0[band, 1] = -imaginary / correlation[1, 0, 0];
+					var real = correlation[0] + sbr.Alpha1[band, 0] *
+						correlation[AacSpectralBandReplication.CorrelationFirstStride + AacSpectralBandReplication.CorrelationSecondStride] +
+						sbr.Alpha1[band, 1] * correlation[AacSpectralBandReplication.CorrelationFirstStride + AacSpectralBandReplication.CorrelationSecondStride + 1];
+					var imaginary = correlation[1] + sbr.Alpha1[band, 1] *
+						correlation[AacSpectralBandReplication.CorrelationFirstStride + AacSpectralBandReplication.CorrelationSecondStride] -
+						sbr.Alpha1[band, 0] * correlation[AacSpectralBandReplication.CorrelationFirstStride + AacSpectralBandReplication.CorrelationSecondStride + 1];
+					sbr.Alpha0[band, 0] = -real / correlation[AacSpectralBandReplication.CorrelationFirstStride];
+					sbr.Alpha0[band, 1] = -imaginary / correlation[AacSpectralBandReplication.CorrelationFirstStride];
 				}
 				if (sbr.Alpha1[band, 0] * sbr.Alpha1[band, 0] + sbr.Alpha1[band, 1] * sbr.Alpha1[band, 1] >= 16.0f ||
 					sbr.Alpha0[band, 0] * sbr.Alpha0[band, 0] + sbr.Alpha0[band, 1] * sbr.Alpha0[band, 1] >= 16.0f)
@@ -227,10 +247,13 @@ namespace Ffmpeg.CsPort.Decoder.Codecs.Aac
 			}
 			for (; destinationBand < sbr.Crossover[1] + sbr.NumberOfSubbands[1]; destinationBand++)
 			{
+				var highRow = sbr.High.AsSpan(destinationBand * AacSpectralBandReplication.HighBandStride,
+					AacSpectralBandReplication.HighBandStride);
 				for (var time = 0; time < 40; time++)
 				{
-					sbr.High[destinationBand, time, 0] = 0.0f;
-					sbr.High[destinationBand, time, 1] = 0.0f;
+					var highIndex = time * AacSpectralBandReplication.HighTimeStride;
+					highRow[highIndex] = 0.0f;
+					highRow[highIndex + 1] = 0.0f;
 				}
 			}
 			return 0;
@@ -471,13 +494,16 @@ namespace Ffmpeg.CsPort.Decoder.Codecs.Aac
 						var component = sineIndex & 1;
 						var firstSign = 1 - ((sineIndex + (crossover & 1)) & 2);
 						var secondSign = (firstSign ^ -component) + component;
+						var adjustedRow = data.Adjusted.AsSpan(data.AnalysisPosition * AacSbrData.AdjustedPositionStride +
+							time * AacSbrData.AdjustedSlotStride + crossover * AacSbrData.AdjustedBandStride,
+							subbandCount * AacSbrData.AdjustedBandStride);
 						for (var band = 0; band + 1 < subbandCount; band += 2)
 						{
-							data.Adjusted[data.AnalysisPosition, time, crossover + band, component] += sbr.SinusoidAmplitude[envelope, band] * firstSign;
-							data.Adjusted[data.AnalysisPosition, time, crossover + band + 1, component] += sbr.SinusoidAmplitude[envelope, band + 1] * secondSign;
+							adjustedRow[band * AacSbrData.AdjustedBandStride + component] += sbr.SinusoidAmplitude[envelope, band] * firstSign;
+							adjustedRow[(band + 1) * AacSbrData.AdjustedBandStride + component] += sbr.SinusoidAmplitude[envelope, band + 1] * secondSign;
 						}
 						if ((subbandCount & 1) != 0)
-							data.Adjusted[data.AnalysisPosition, time, crossover + subbandCount - 1, component] +=
+							adjustedRow[(subbandCount - 1) * AacSbrData.AdjustedBandStride + component] +=
 								sbr.SinusoidAmplitude[envelope, subbandCount - 1] * firstSign;
 					}
 					noiseIndex = (noiseIndex + subbandCount) & 0x1ff;
@@ -494,46 +520,56 @@ namespace Ffmpeg.CsPort.Decoder.Codecs.Aac
 		private static void GenerateOutputSubbands(AacSpectralBandReplication sbr, AacSbrData data, int channel)
 		{
 			var temporaryTime = Math.Max(2 * data.PreviousEnvelopeEnd - 32, 0);
-			for (var component = 0; component < 2; component++)
-			{
-				for (var time = 0; time < 38; time++)
-				{
-					for (var band = 0; band < 64; band++)
-						sbr.Output[channel, component, time, band] = 0.0f;
-				}
-			}
+			var outputChannelOffset = channel * AacSpectralBandReplication.OutputChannelStride;
+			sbr.Output.AsSpan(outputChannelOffset, AacSpectralBandReplication.OutputChannelStride).Clear();
 			var bandIndex = 0;
 			for (; bandIndex < sbr.Crossover[0]; bandIndex++)
 			{
+				var lowRow = sbr.Low.AsSpan(bandIndex * AacSpectralBandReplication.LowBandStride,
+					AacSpectralBandReplication.LowBandStride);
 				for (var time = 0; time < temporaryTime; time++)
 				{
-					sbr.Output[channel, 0, time, bandIndex] = sbr.Low[bandIndex, time + 2, 0];
-					sbr.Output[channel, 1, time, bandIndex] = sbr.Low[bandIndex, time + 2, 1];
+					var outputIndex = outputChannelOffset + time * AacSpectralBandReplication.OutputTimeStride + bandIndex;
+					var lowIndex = (time + 2) * AacSpectralBandReplication.LowTimeStride;
+					sbr.Output[outputIndex] = lowRow[lowIndex];
+					sbr.Output[outputIndex + AacSpectralBandReplication.OutputComponentStride] = lowRow[lowIndex + 1];
 				}
 			}
+			var previousAdjustedOffset = (1 - data.AnalysisPosition) * AacSbrData.AdjustedPositionStride;
 			for (; bandIndex < sbr.Crossover[0] + sbr.NumberOfSubbands[0]; bandIndex++)
 			{
 				for (var time = 0; time < temporaryTime; time++)
 				{
-					sbr.Output[channel, 0, time, bandIndex] = data.Adjusted[1 - data.AnalysisPosition, time + 32, bandIndex, 0];
-					sbr.Output[channel, 1, time, bandIndex] = data.Adjusted[1 - data.AnalysisPosition, time + 32, bandIndex, 1];
+					var outputIndex = outputChannelOffset + time * AacSpectralBandReplication.OutputTimeStride + bandIndex;
+					var adjustedIndex = previousAdjustedOffset + (time + 32) * AacSbrData.AdjustedSlotStride +
+						bandIndex * AacSbrData.AdjustedBandStride;
+					sbr.Output[outputIndex] = data.Adjusted[adjustedIndex];
+					sbr.Output[outputIndex + AacSpectralBandReplication.OutputComponentStride] = data.Adjusted[adjustedIndex + 1];
 				}
 			}
 			bandIndex = 0;
 			for (; bandIndex < sbr.Crossover[1]; bandIndex++)
 			{
+				var lowRow = sbr.Low.AsSpan(bandIndex * AacSpectralBandReplication.LowBandStride,
+					AacSpectralBandReplication.LowBandStride);
 				for (var time = temporaryTime; time < 38; time++)
 				{
-					sbr.Output[channel, 0, time, bandIndex] = sbr.Low[bandIndex, time + 2, 0];
-					sbr.Output[channel, 1, time, bandIndex] = sbr.Low[bandIndex, time + 2, 1];
+					var outputIndex = outputChannelOffset + time * AacSpectralBandReplication.OutputTimeStride + bandIndex;
+					var lowIndex = (time + 2) * AacSpectralBandReplication.LowTimeStride;
+					sbr.Output[outputIndex] = lowRow[lowIndex];
+					sbr.Output[outputIndex + AacSpectralBandReplication.OutputComponentStride] = lowRow[lowIndex + 1];
 				}
 			}
+			var currentAdjustedOffset = data.AnalysisPosition * AacSbrData.AdjustedPositionStride;
 			for (; bandIndex < sbr.Crossover[1] + sbr.NumberOfSubbands[1]; bandIndex++)
 			{
 				for (var time = temporaryTime; time < 32; time++)
 				{
-					sbr.Output[channel, 0, time, bandIndex] = data.Adjusted[data.AnalysisPosition, time, bandIndex, 0];
-					sbr.Output[channel, 1, time, bandIndex] = data.Adjusted[data.AnalysisPosition, time, bandIndex, 1];
+					var outputIndex = outputChannelOffset + time * AacSpectralBandReplication.OutputTimeStride + bandIndex;
+					var adjustedIndex = currentAdjustedOffset + time * AacSbrData.AdjustedSlotStride +
+						bandIndex * AacSbrData.AdjustedBandStride;
+					sbr.Output[outputIndex] = data.Adjusted[adjustedIndex];
+					sbr.Output[outputIndex + AacSpectralBandReplication.OutputComponentStride] = data.Adjusted[adjustedIndex + 1];
 				}
 			}
 		}
@@ -595,14 +631,9 @@ namespace Ffmpeg.CsPort.Decoder.Codecs.Aac
 					AacPsProcessor.Apply(sbr.ParametricStereo, sbr.Output, sbr.Crossover[1] + sbr.NumberOfSubbands[1]);
 				} else
 				{
-					for (var component = 0; component < 2; component++)
-					{
-						for (var time = 0; time < 38; time++)
-						{
-							for (var band = 0; band < 64; band++)
-								sbr.Output[1, component, time, band] = sbr.Output[0, component, time, band];
-						}
-					}
+					sbr.Output.AsSpan(0, AacSpectralBandReplication.OutputChannelStride).CopyTo(
+						sbr.Output.AsSpan(AacSpectralBandReplication.OutputChannelStride,
+							AacSpectralBandReplication.OutputChannelStride));
 				}
 			}
 			var downsampled = outputSampleRate < sbr.SampleRate;

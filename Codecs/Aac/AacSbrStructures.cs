@@ -23,8 +23,8 @@
  * You should have received a copy of the GNU Lesser General Public License along with
  * this library. If not, see <https://www.gnu.org/licenses/>.
  *
- * PORT-NOTE: 1:1 translation. Do not refactor, reorder, or simplify; bit-exactness
- * against the FFmpeg reference is verified by the conformance tests.
+ * PORT-NOTE: 1:1 translation. Performance-motivated, semantics-preserving transformations
+ * applied (see repository history); bit-exactness remains verified by the conformance tests.
  */
 using Ffmpeg.CsPort.Decoder.Transforms;
 
@@ -61,6 +61,13 @@ namespace Ffmpeg.CsPort.Decoder.Codecs.Aac
 	/// <summary>Owns one SBR channel's persistent grid, envelope, filterbank, harmonic, and smoothing state.</summary>
 	internal sealed class AacSbrData
 	{
+		public const int AnalysisBandStride = 2;
+		public const int AnalysisSlotStride = 32 * AnalysisBandStride;
+		public const int AnalysisPositionStride = 32 * AnalysisSlotStride;
+		public const int AdjustedBandStride = 2;
+		public const int AdjustedSlotStride = 64 * AdjustedBandStride;
+		public const int AdjustedPositionStride = 38 * AdjustedSlotStride;
+
 		public int FrameClass;
 		public bool AddHarmonicFlag;
 		public int NumberOfEnvelopes;
@@ -76,9 +83,9 @@ namespace Ffmpeg.CsPort.Decoder.Codecs.Aac
 		public int SynthesisFilterbankSamplesOffset = 1152;
 		public int[] AttackEnvelope = { 0, -1 };
 		public float[] Bandwidth = new float[5];
-		public float[,,,] Analysis = new float[2, 32, 32, 2];
+		public float[] Analysis = new float[2 * AnalysisPositionStride];
 		public int AnalysisPosition;
-		public float[,,,] Adjusted = new float[2, 38, 64, 2];
+		public float[] Adjusted = new float[2 * AdjustedPositionStride];
 		public float[,] GainHistory = new float[42, 48];
 		public float[,] NoiseHistory = new float[42, 48];
 		public byte[,] SinusoidIndexMapped = new byte[9, 48];
@@ -96,6 +103,16 @@ namespace Ffmpeg.CsPort.Decoder.Codecs.Aac
 	/// <summary>Owns all scalar SBR parser, frequency-grid, QMF, high-frequency, and envelope workspaces for one AAC element.</summary>
 	internal sealed class AacSpectralBandReplication
 	{
+		public const int LowTimeStride = 2;
+		public const int LowBandStride = 40 * LowTimeStride;
+		public const int HighTimeStride = 2;
+		public const int HighBandStride = 40 * HighTimeStride;
+		public const int OutputTimeStride = 64;
+		public const int OutputComponentStride = 38 * OutputTimeStride;
+		public const int OutputChannelStride = 2 * OutputComponentStride;
+		public const int CorrelationSecondStride = 2;
+		public const int CorrelationFirstStride = 2 * CorrelationSecondStride;
+
 		public AacParametricStereo ParametricStereo = new AacParametricStereo();
 		public int SampleRate;
 		public bool Started;
@@ -126,9 +143,9 @@ namespace Ffmpeg.CsPort.Decoder.Codecs.Aac
 		public int NumberOfPatches;
 		public byte[] PatchSubbandCount = new byte[6];
 		public byte[] PatchStartSubband = new byte[6];
-		public float[,,] Low = new float[32, 40, 2];
-		public float[,,] High = new float[64, 40, 2];
-		public float[,,,] Output = new float[2, 2, 38, 64];
+		public float[] Low = new float[32 * LowBandStride];
+		public float[] High = new float[64 * HighBandStride];
+		public float[] Output = new float[2 * OutputChannelStride];
 		public float[,] Alpha0 = new float[64, 2];
 		public float[,] Alpha1 = new float[64, 2];
 		public float[,] OriginalEnvelopeMapped = new float[8, 48];
@@ -143,7 +160,7 @@ namespace Ffmpeg.CsPort.Decoder.Codecs.Aac
 		public float[] MdctInput = new float[64];
 		public float[] GainFilterScratch = new float[48];
 		public float[] NoiseFilterScratch = new float[48];
-		public float[,,] CorrelationScratch = new float[3, 2, 2];
+		public float[] CorrelationScratch = new float[3 * CorrelationFirstStride];
 		public short[] BandScratch0 = new short[49];
 		public short[] BandScratch1 = new short[49];
 		public readonly FfmpegFloatMdct SynthesisMdct = new FfmpegFloatMdct(64, true, 1.0f / (64 * 32768));
