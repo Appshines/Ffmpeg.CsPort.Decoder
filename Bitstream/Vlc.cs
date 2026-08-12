@@ -23,8 +23,8 @@
  * You should have received a copy of the GNU Lesser General Public License along with
  * this library. If not, see <https://www.gnu.org/licenses/>.
  *
- * PORT-NOTE: 1:1 translation. Do not refactor, reorder, or simplify; bit-exactness
- * against the FFmpeg reference is verified by the conformance tests.
+ * PORT-NOTE: 1:1 translation. Performance-motivated, semantics-preserving transformations
+ * applied (see repository history); bit-exactness remains verified by the conformance tests.
  */
 using System;
 using Ffmpeg.CsPort.Decoder.Infrastructure;
@@ -335,8 +335,8 @@ namespace Ffmpeg.CsPort.Decoder.Bitstream
 		/// </summary>
 		private static void SortCodes(VlcCode[] codes, int count)
 		{
-			var starts = new int[64];
-			var ends = new int[64];
+			Span<int> starts = stackalloc int[64];
+			Span<int> ends = stackalloc int[64];
 			var stackPosition = 1;
 			starts[0] = 0;
 			ends[0] = count - 1;

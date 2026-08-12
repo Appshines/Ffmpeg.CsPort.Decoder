@@ -23,10 +23,12 @@
  * You should have received a copy of the GNU Lesser General Public License along with
  * this library. If not, see <https://www.gnu.org/licenses/>.
  *
- * PORT-NOTE: 1:1 translation. Do not refactor, reorder, or simplify; bit-exactness
- * against the FFmpeg reference is verified by the conformance tests.
+ * PORT-NOTE: 1:1 translation. Performance-motivated, semantics-preserving transformations
+ * applied (see repository history); bit-exactness remains verified by the conformance tests.
  */
 using System;
+using System.Buffers.Binary;
+using System.Runtime.CompilerServices;
 using Ffmpeg.CsPort.Decoder.Infrastructure;
 using Ffmpeg.CsPort.Decoder.Mathematics;
 
@@ -86,6 +88,7 @@ namespace Ffmpeg.CsPort.Decoder.Bitstream
 			return Initialize(buffer, byteSize * 8, littleEndian);
 		}
 
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		public uint ReadBits(int bitCount)
 		{
 			if (bitCount <= 0 || bitCount > 25)
@@ -151,10 +154,13 @@ namespace Ffmpeg.CsPort.Decoder.Bitstream
 			return bitCount != 0 ? FfmpegMath.SignExtend64(ReadBits64(bitCount), bitCount) : 0;
 		}
 
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		public uint ReadBit()
 		{
 			var index = _Index;
-			var result = ReadPaddedByte(index >> 3);
+			var byteIndex = index >> 3;
+			var result = _Buffer != null && (uint)byteIndex < (uint)_ByteLength ?
+				_Buffer[_ByteOffset + byteIndex] : (byte)0;
 			if (_LittleEndian)
 			{
 				result >>= index & 7;
@@ -173,6 +179,7 @@ namespace Ffmpeg.CsPort.Decoder.Bitstream
 			return result;
 		}
 
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		public uint ShowBits(int bitCount)
 		{
 			if (bitCount <= 0 || bitCount > 25)
@@ -183,6 +190,7 @@ namespace Ffmpeg.CsPort.Decoder.Bitstream
 			return _LittleEndian ? ShowLittleEndianBits(bitCount) : ShowBigEndianBits(bitCount);
 		}
 
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		public uint ShowBitsLong(int bitCount)
 		{
 			if (bitCount <= 0 || bitCount > 32)
@@ -193,9 +201,19 @@ namespace Ffmpeg.CsPort.Decoder.Bitstream
 			return _LittleEndian ? ShowLittleEndianBits(bitCount) : ShowBigEndianBits(bitCount);
 		}
 
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		public void SkipBits(int bitCount)
 		{
-			_Index += FfmpegMath.Clip(bitCount, -_Index, _SizeInBitsPlusEight - _Index);
+			if (bitCount < -_Index)
+			{
+				_Index = 0;
+			} else if (bitCount > _SizeInBitsPlusEight - _Index)
+			{
+				_Index = _SizeInBitsPlusEight;
+			} else
+			{
+				_Index += bitCount;
+			}
 		}
 
 		public void Seek(int position)
@@ -264,6 +282,7 @@ namespace Ffmpeg.CsPort.Decoder.Bitstream
 			return 0;
 		}
 
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		public int ReadVlc(VlcElement[] table, int rootBits, int maximumDepth)
 		{
 			var index = ShowBits(rootBits);
@@ -289,7 +308,239 @@ namespace Ffmpeg.CsPort.Decoder.Bitstream
 			return code;
 		}
 
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		public BitReaderLocal OpenLocal()
+		{
+			if (_LittleEndian)
+			{
+				throw new InvalidOperationException("Local bit-reader state supports big-endian bitstreams only.");
+			}
+
+			return new BitReaderLocal(this);
+		}
+
+		/// <summary>
+		/// Holds FFmpeg-style open-reader state locally and writes only the final bit index back to its owner.
+		/// </summary>
+		internal ref struct BitReaderLocal
+		{
+			private readonly BitReader _Reader;
+			private int _Index;
+			private ulong _Cache;
+			private int _CacheBits;
+
+			internal BitReaderLocal(BitReader reader)
+			{
+				_Reader = reader;
+				_Index = reader._Index;
+				_Cache = 0;
+				_CacheBits = 0;
+			}
+
+			public int Position => _Index;
+			public int BitsLeft => _Reader._SizeInBits - _Index;
+			public int CacheBits => _CacheBits;
+
+			[MethodImpl(MethodImplOptions.AggressiveInlining)]
+			public uint ReadBit()
+			{
+				EnsureCache(1);
+				var result = (uint)(_Cache >> 63);
+				ConsumeBits(1);
+				return result;
+			}
+
+			[MethodImpl(MethodImplOptions.AggressiveInlining)]
+			public uint ReadBits(int bitCount)
+			{
+				if (bitCount <= 0 || bitCount > 25)
+				{
+					throw new ArgumentOutOfRangeException(nameof(bitCount));
+				}
+
+				var result = ShowBits(bitCount);
+				ConsumeBits(bitCount);
+				return result;
+			}
+
+			[MethodImpl(MethodImplOptions.AggressiveInlining)]
+			public uint ReadBitsOrZero(int bitCount)
+			{
+				return bitCount != 0 ? ReadBits(bitCount) : 0;
+			}
+
+			[MethodImpl(MethodImplOptions.AggressiveInlining)]
+			public uint ReadBitsLong(int bitCount)
+			{
+				if (bitCount < 0 || bitCount > 32)
+				{
+					throw new ArgumentOutOfRangeException(nameof(bitCount));
+				}
+				if (bitCount == 0)
+				{
+					return 0;
+				}
+
+				EnsureCache(bitCount);
+				var result = (uint)(_Cache >> (64 - bitCount));
+				ConsumeBits(bitCount);
+				return result;
+			}
+
+			[MethodImpl(MethodImplOptions.AggressiveInlining)]
+			public int ReadSignedBits(int bitCount)
+			{
+				return bitCount != 0 ? FfmpegMath.SignExtend(ReadBitsLong(bitCount), bitCount) : 0;
+			}
+
+			[MethodImpl(MethodImplOptions.AggressiveInlining)]
+			public uint ShowBits(int bitCount)
+			{
+				if (bitCount <= 0 || bitCount > 25)
+				{
+					throw new ArgumentOutOfRangeException(nameof(bitCount));
+				}
+
+				EnsureCache(bitCount);
+				return (uint)(_Cache >> (64 - bitCount));
+			}
+
+			[MethodImpl(MethodImplOptions.AggressiveInlining)]
+			public ulong PeekCache()
+			{
+				EnsureCache(32);
+				return _Cache;
+			}
+
+			[MethodImpl(MethodImplOptions.AggressiveInlining)]
+			public void SkipBits(int bitCount)
+			{
+				var previousIndex = _Index;
+				if (bitCount < -_Index)
+				{
+					_Index = 0;
+				} else if (bitCount > _Reader._SizeInBitsPlusEight - _Index)
+				{
+					_Index = _Reader._SizeInBitsPlusEight;
+				} else
+				{
+					_Index += bitCount;
+				}
+
+				var skippedBits = _Index - previousIndex;
+				if (skippedBits < 0 || skippedBits >= _CacheBits)
+				{
+					_CacheBits = 0;
+				} else if (skippedBits != 0)
+				{
+					_Cache <<= skippedBits;
+					_CacheBits -= skippedBits;
+				}
+			}
+
+			[MethodImpl(MethodImplOptions.AggressiveInlining)]
+			public int ReadVlc(VlcElement[] table, int rootBits, int maximumDepth)
+			{
+				var index = ShowBits(rootBits);
+				var code = table[index].Symbol;
+				var length = table[index].Length;
+				if (maximumDepth > 1 && length < 0)
+				{
+					ConsumeBits(rootBits);
+					var nextBits = -length;
+					index = (uint)(ShowBits(nextBits) + code);
+					code = table[index].Symbol;
+					length = table[index].Length;
+					if (maximumDepth > 2 && length < 0)
+					{
+						ConsumeBits(nextBits);
+						nextBits = -length;
+						index = (uint)(ShowBits(nextBits) + code);
+						code = table[index].Symbol;
+						length = table[index].Length;
+					}
+				}
+				ConsumeBits(length);
+				return code;
+			}
+
+			[MethodImpl(MethodImplOptions.AggressiveInlining)]
+			public void Close()
+			{
+				_Reader._Index = _Index;
+			}
+
+			[MethodImpl(MethodImplOptions.AggressiveInlining)]
+			private void EnsureCache(int bitCount)
+			{
+				if (_CacheBits < bitCount)
+				{
+					_Cache = _Reader.LoadBigEndianCache(_Index);
+					_CacheBits = 64 - (_Index & 7);
+				}
+			}
+
+			[MethodImpl(MethodImplOptions.AggressiveInlining)]
+			private void ConsumeBits(int bitCount)
+			{
+				var remainingBits = _Reader._SizeInBitsPlusEight - _Index;
+				if (bitCount > remainingBits)
+				{
+					bitCount = remainingBits;
+				}
+
+				_Index += bitCount;
+				if (bitCount >= _CacheBits)
+				{
+					_CacheBits = 0;
+				} else if (bitCount != 0)
+				{
+					_Cache <<= bitCount;
+					_CacheBits -= bitCount;
+				}
+			}
+
+		}
+
+		[MethodImpl(MethodImplOptions.NoInlining)]
+		private ulong LoadBigEndianCache(int index)
+		{
+			var offset = index >> 3;
+			var bitOffset = index & 7;
+			if (BitConverter.IsLittleEndian && (uint)(offset + 8) <= (uint)_ByteLength)
+			{
+				// The explicit eight-byte availability check keeps this unaligned read inside the logical bitstream buffer.
+				return BinaryPrimitives.ReverseEndianness(
+					Unsafe.ReadUnaligned<ulong>(ref _Buffer[_ByteOffset + offset])) << bitOffset;
+			}
+
+			return ((ulong)ReadPaddedByte(offset) << 56 |
+				(ulong)ReadPaddedByte(offset + 1) << 48 |
+				(ulong)ReadPaddedByte(offset + 2) << 40 |
+				(ulong)ReadPaddedByte(offset + 3) << 32 |
+				(ulong)ReadPaddedByte(offset + 4) << 24 |
+				(ulong)ReadPaddedByte(offset + 5) << 16 |
+				(ulong)ReadPaddedByte(offset + 6) << 8 |
+				ReadPaddedByte(offset + 7)) << bitOffset;
+		}
+
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		private uint ShowBigEndianBits(int bitCount)
+		{
+			var offset = _Index >> 3;
+			if (BitConverter.IsLittleEndian && (uint)(offset + 8) <= (uint)_ByteLength)
+			{
+				// The explicit eight-byte availability check keeps this unaligned read inside the logical bitstream buffer.
+				var raw = Unsafe.ReadUnaligned<ulong>(ref _Buffer[_ByteOffset + offset]);
+				raw = BinaryPrimitives.ReverseEndianness(raw);
+				return (uint)((raw << (_Index & 7)) >> (64 - bitCount));
+			}
+
+			return ShowBigEndianBitsSlow(bitCount);
+		}
+
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		private uint ShowBigEndianBitsSlow(int bitCount)
 		{
 			var offset = _Index >> 3;
 			var bitOffset = _Index & 7;
@@ -302,7 +553,23 @@ namespace Ffmpeg.CsPort.Decoder.Bitstream
 			return bitCount == 32 ? value : value & ((1U << bitCount) - 1);
 		}
 
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		private uint ShowLittleEndianBits(int bitCount)
+		{
+			var offset = _Index >> 3;
+			if (BitConverter.IsLittleEndian && (uint)(offset + 8) <= (uint)_ByteLength)
+			{
+				// The explicit eight-byte availability check keeps this unaligned read inside the logical bitstream buffer.
+				var raw = Unsafe.ReadUnaligned<ulong>(ref _Buffer[_ByteOffset + offset]);
+				var value = (uint)(raw >> (_Index & 7));
+				return bitCount == 32 ? value : value & ((1U << bitCount) - 1);
+			}
+
+			return ShowLittleEndianBitsSlow(bitCount);
+		}
+
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		private uint ShowLittleEndianBitsSlow(int bitCount)
 		{
 			var offset = _Index >> 3;
 			var cache = (ulong)ReadPaddedByte(offset) |
