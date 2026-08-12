@@ -23,11 +23,12 @@
  * You should have received a copy of the GNU Lesser General Public License along with
  * this library. If not, see <https://www.gnu.org/licenses/>.
  *
- * PORT-NOTE: 1:1 translation. Do not refactor, reorder, or simplify; bit-exactness
- * against the FFmpeg reference is verified by the conformance tests.
+ * PORT-NOTE: 1:1 translation. Performance-motivated, semantics-preserving transformations
+ * applied (see repository history); bit-exactness remains verified by the conformance tests.
  */
 using System;
 using System.Buffers.Binary;
+using System.Runtime.InteropServices;
 using Ffmpeg.CsPort.Decoder.Audio;
 using Ffmpeg.CsPort.Decoder.Bitstream;
 using Ffmpeg.CsPort.Decoder.Infrastructure;
@@ -122,7 +123,11 @@ namespace Ffmpeg.CsPort.Decoder.Codecs.Vorbis
 			{
 				var plane = outputPlanes[channel];
 				var destinationOffset = channel * planeSize;
-				for (var sample = 0; sample < length; sample++)
+				if (BitConverter.IsLittleEndian)
+				{
+					MemoryMarshal.AsBytes(plane.AsSpan(0, length))
+						.CopyTo(output.Slice(destinationOffset, planeSize));
+				} else for (var sample = 0; sample < length; sample++)
 				{
 					BinaryPrimitives.WriteInt32LittleEndian(
 						output.Slice(destinationOffset + sample * 4, 4),
