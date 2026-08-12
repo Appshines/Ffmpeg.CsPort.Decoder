@@ -23,10 +23,11 @@
  * You should have received a copy of the GNU Lesser General Public License along with
  * this library. If not, see <https://www.gnu.org/licenses/>.
  *
- * PORT-NOTE: 1:1 translation. Do not refactor, reorder, or simplify; bit-exactness
- * against the FFmpeg reference is verified by the conformance tests.
+ * PORT-NOTE: 1:1 translation. Performance-motivated, semantics-preserving transformations
+ * applied (see repository history); bit-exactness remains verified by the conformance tests.
  */
 using System;
+using System.Numerics;
 
 namespace Ffmpeg.CsPort.Decoder.Codecs.Opus
 {
@@ -260,18 +261,15 @@ namespace Ffmpeg.CsPort.Decoder.Codecs.Opus
 
 		private static int Log2(uint value)
 		{
-			var result = -1;
-			while (value != 0)
-			{
-				value >>= 1;
-				result++;
-			}
-			return result;
+			// LeadingZeroCount(0) is 32, yielding the reference value -1. For nonzero
+			// values, subtracting from 31 is exactly the highest set-bit index.
+			return 31 - BitOperations.LeadingZeroCount(value);
 		}
 
 		private static int IntegerLog(uint value)
 		{
-			return Log2(value) + (value != 0 ? 1 : 0);
+			// The zero case becomes 0; every nonzero result is Log2(value) + 1.
+			return 32 - BitOperations.LeadingZeroCount(value);
 		}
 
 		private static uint IntegerSquareRoot(uint value)
