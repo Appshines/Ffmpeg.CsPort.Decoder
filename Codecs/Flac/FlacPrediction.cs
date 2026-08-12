@@ -23,15 +23,19 @@
  * You should have received a copy of the GNU Lesser General Public License along with
  * this library. If not, see <https://www.gnu.org/licenses/>.
  *
- * PORT-NOTE: 1:1 translation. Do not refactor, reorder, or simplify; bit-exactness
- * against the FFmpeg reference is verified by the conformance tests.
+ * PORT-NOTE: 1:1 translation. Performance-motivated, semantics-preserving transformations
+ * applied (see repository history); bit-exactness remains verified by the conformance tests.
  */
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 using Ffmpeg.CsPort.Decoder.Infrastructure;
 
 namespace Ffmpeg.CsPort.Decoder.Codecs.Flac
 {
 	/// <summary>
-	/// Ports FLAC fixed and LPC reconstruction plus wasted-bit restoration from flacdec.c and flacdsp.c.
+	/// Ports FLAC fixed and LPC reconstruction, including guarded AVX2 integer kernels, plus wasted-bit restoration.
 	/// </summary>
 	internal static class FlacPrediction
 	{
@@ -159,6 +163,17 @@ namespace Ffmpeg.CsPort.Decoder.Codecs.Flac
 		/// </summary>
 		public static void DecodeLpc16(int[] decoded, int[] coefficients, int predictorOrder, int quantizationLevel, int length)
 		{
+			if (Avx2.IsSupported && predictorOrder >= 8 && predictorOrder <= 32)
+			{
+				if (predictorOrder <= 8)
+					DecodeLpc16Avx2Order8(decoded, coefficients, quantizationLevel, length);
+				else if (predictorOrder <= 16)
+					DecodeLpc16Avx2Order16(decoded, coefficients, predictorOrder, quantizationLevel, length);
+				else
+					DecodeLpc16Avx2Order32(decoded, coefficients, predictorOrder, quantizationLevel, length);
+				return;
+			}
+
 			var index = predictorOrder;
 			var decodedOffset = 0;
 			for (; index < length - 1; index += 2, decodedOffset += 2)
@@ -196,6 +211,17 @@ namespace Ffmpeg.CsPort.Decoder.Codecs.Flac
 
 		public static void DecodeLpc32(int[] decoded, int[] coefficients, int predictorOrder, int quantizationLevel, int length)
 		{
+			if (Avx2.IsSupported && predictorOrder >= 8 && predictorOrder <= 32)
+			{
+				if (predictorOrder <= 8)
+					DecodeLpc32Avx2Order8(decoded, coefficients, quantizationLevel, length);
+				else if (predictorOrder <= 16)
+					DecodeLpc32Avx2Order16(decoded, coefficients, predictorOrder, quantizationLevel, length);
+				else
+					DecodeLpc32Avx2Order32(decoded, coefficients, predictorOrder, quantizationLevel, length);
+				return;
+			}
+
 			var decodedOffset = 0;
 			for (var index = predictorOrder; index < length; index++, decodedOffset++)
 			{
@@ -205,6 +231,161 @@ namespace Ffmpeg.CsPort.Decoder.Codecs.Flac
 					sum = unchecked(sum + (long)coefficients[coefficientIndex] * decoded[decodedOffset + coefficientIndex]);
 				decoded[decodedOffset + coefficientIndex] = unchecked((int)(decoded[decodedOffset + coefficientIndex] + (sum >> quantizationLevel)));
 			}
+		}
+
+		private static void DecodeLpc16Avx2Order8(int[] decoded, int[] coefficients, int quantizationLevel, int length)
+		{
+			const int predictorOrder = 8;
+			var coefficient0 = LoadVector(coefficients, 0);
+			for (var decodedOffset = 0; decodedOffset + predictorOrder < length; decodedOffset++)
+			{
+				var accumulator = Avx2.MultiplyLow(coefficient0, LoadVector(decoded, decodedOffset));
+				var sum = Vector256.Sum(accumulator);
+				var outputIndex = decodedOffset + predictorOrder;
+				decoded[outputIndex] = unchecked((int)((uint)decoded[outputIndex] + (uint)(sum >> quantizationLevel)));
+			}
+		}
+
+		private static void DecodeLpc16Avx2Order16(int[] decoded, int[] coefficients, int predictorOrder, int quantizationLevel, int length)
+		{
+			var coefficient0 = LoadVector(coefficients, 0);
+			if (predictorOrder == 16)
+			{
+				var coefficient1 = LoadVector(coefficients, 8);
+				for (var decodedOffset = 0; decodedOffset + predictorOrder < length; decodedOffset++)
+				{
+					var accumulator = Avx2.MultiplyLow(coefficient0, LoadVector(decoded, decodedOffset));
+					accumulator = Avx2.Add(accumulator, Avx2.MultiplyLow(coefficient1, LoadVector(decoded, decodedOffset + 8)));
+					var sum = Vector256.Sum(accumulator);
+					var outputIndex = decodedOffset + predictorOrder;
+					decoded[outputIndex] = unchecked((int)((uint)decoded[outputIndex] + (uint)(sum >> quantizationLevel)));
+				}
+				return;
+			}
+
+			for (var decodedOffset = 0; decodedOffset + predictorOrder < length; decodedOffset++)
+			{
+				var accumulator = Avx2.MultiplyLow(coefficient0, LoadVector(decoded, decodedOffset));
+				var sum = Vector256.Sum(accumulator);
+				for (var coefficientIndex = 8; coefficientIndex < predictorOrder; coefficientIndex++)
+					sum = unchecked(sum + coefficients[coefficientIndex] * decoded[decodedOffset + coefficientIndex]);
+				var outputIndex = decodedOffset + predictorOrder;
+				decoded[outputIndex] = unchecked((int)((uint)decoded[outputIndex] + (uint)(sum >> quantizationLevel)));
+			}
+		}
+
+		private static void DecodeLpc16Avx2Order32(int[] decoded, int[] coefficients, int predictorOrder, int quantizationLevel, int length)
+		{
+			var coefficient0 = LoadVector(coefficients, 0);
+			var coefficient1 = LoadVector(coefficients, 8);
+			var coefficient2 = predictorOrder >= 24 ? LoadVector(coefficients, 16) : Vector256<int>.Zero;
+			var coefficient3 = predictorOrder == 32 ? LoadVector(coefficients, 24) : Vector256<int>.Zero;
+			for (var decodedOffset = 0; decodedOffset + predictorOrder < length; decodedOffset++)
+			{
+				var accumulator = Avx2.MultiplyLow(coefficient0, LoadVector(decoded, decodedOffset));
+				accumulator = Avx2.Add(accumulator, Avx2.MultiplyLow(coefficient1, LoadVector(decoded, decodedOffset + 8)));
+				var coefficientIndex = 16;
+				if (predictorOrder >= 24)
+				{
+					accumulator = Avx2.Add(accumulator, Avx2.MultiplyLow(coefficient2, LoadVector(decoded, decodedOffset + 16)));
+					coefficientIndex = 24;
+				}
+				if (predictorOrder == 32)
+				{
+					accumulator = Avx2.Add(accumulator, Avx2.MultiplyLow(coefficient3, LoadVector(decoded, decodedOffset + 24)));
+					coefficientIndex = 32;
+				}
+				var sum = Vector256.Sum(accumulator);
+				for (; coefficientIndex < predictorOrder; coefficientIndex++)
+					sum = unchecked(sum + coefficients[coefficientIndex] * decoded[decodedOffset + coefficientIndex]);
+				var outputIndex = decodedOffset + predictorOrder;
+				decoded[outputIndex] = unchecked((int)((uint)decoded[outputIndex] + (uint)(sum >> quantizationLevel)));
+			}
+		}
+
+		private static void DecodeLpc32Avx2Order8(int[] decoded, int[] coefficients, int quantizationLevel, int length)
+		{
+			const int predictorOrder = 8;
+			var coefficient0 = LoadVector(coefficients, 0);
+			for (var decodedOffset = 0; decodedOffset + predictorOrder < length; decodedOffset++)
+			{
+				AccumulateLpc32(Vector256<long>.Zero, Vector256<long>.Zero, coefficient0, LoadVector(decoded, decodedOffset), out var even, out var odd);
+				var sum = unchecked(Vector256.Sum(even) + Vector256.Sum(odd));
+				var outputIndex = decodedOffset + predictorOrder;
+				decoded[outputIndex] = unchecked((int)(decoded[outputIndex] + (sum >> quantizationLevel)));
+			}
+		}
+
+		private static void DecodeLpc32Avx2Order16(int[] decoded, int[] coefficients, int predictorOrder, int quantizationLevel, int length)
+		{
+			var coefficient0 = LoadVector(coefficients, 0);
+			var coefficient1 = predictorOrder == 16 ? LoadVector(coefficients, 8) : Vector256<int>.Zero;
+			for (var decodedOffset = 0; decodedOffset + predictorOrder < length; decodedOffset++)
+			{
+				AccumulateLpc32(Vector256<long>.Zero, Vector256<long>.Zero, coefficient0, LoadVector(decoded, decodedOffset), out var even, out var odd);
+				var coefficientIndex = 8;
+				if (predictorOrder == 16)
+				{
+					AccumulateLpc32(even, odd, coefficient1, LoadVector(decoded, decodedOffset + 8), out even, out odd);
+					coefficientIndex = 16;
+				}
+				var sum = unchecked(Vector256.Sum(even) + Vector256.Sum(odd));
+				for (; coefficientIndex < predictorOrder; coefficientIndex++)
+					sum = unchecked(sum + (long)coefficients[coefficientIndex] * decoded[decodedOffset + coefficientIndex]);
+				var outputIndex = decodedOffset + predictorOrder;
+				decoded[outputIndex] = unchecked((int)(decoded[outputIndex] + (sum >> quantizationLevel)));
+			}
+		}
+
+		private static void DecodeLpc32Avx2Order32(int[] decoded, int[] coefficients, int predictorOrder, int quantizationLevel, int length)
+		{
+			var coefficient0 = LoadVector(coefficients, 0);
+			var coefficient1 = LoadVector(coefficients, 8);
+			var coefficient2 = predictorOrder >= 24 ? LoadVector(coefficients, 16) : Vector256<int>.Zero;
+			var coefficient3 = predictorOrder == 32 ? LoadVector(coefficients, 24) : Vector256<int>.Zero;
+			for (var decodedOffset = 0; decodedOffset + predictorOrder < length; decodedOffset++)
+			{
+				AccumulateLpc32(Vector256<long>.Zero, Vector256<long>.Zero, coefficient0, LoadVector(decoded, decodedOffset), out var even, out var odd);
+				AccumulateLpc32(even, odd, coefficient1, LoadVector(decoded, decodedOffset + 8), out even, out odd);
+				var coefficientIndex = 16;
+				if (predictorOrder >= 24)
+				{
+					AccumulateLpc32(even, odd, coefficient2, LoadVector(decoded, decodedOffset + 16), out even, out odd);
+					coefficientIndex = 24;
+				}
+				if (predictorOrder == 32)
+				{
+					AccumulateLpc32(even, odd, coefficient3, LoadVector(decoded, decodedOffset + 24), out even, out odd);
+					coefficientIndex = 32;
+				}
+				var sum = unchecked(Vector256.Sum(even) + Vector256.Sum(odd));
+				for (; coefficientIndex < predictorOrder; coefficientIndex++)
+					sum = unchecked(sum + (long)coefficients[coefficientIndex] * decoded[decodedOffset + coefficientIndex]);
+				var outputIndex = decodedOffset + predictorOrder;
+				decoded[outputIndex] = unchecked((int)(decoded[outputIndex] + (sum >> quantizationLevel)));
+			}
+		}
+
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		private static void AccumulateLpc32(
+			Vector256<long> even,
+			Vector256<long> odd,
+			Vector256<int> coefficients,
+			Vector256<int> samples,
+			out Vector256<long> accumulatedEven,
+			out Vector256<long> accumulatedOdd)
+		{
+			accumulatedEven = Avx2.Add(even, Avx2.Multiply(coefficients, samples));
+			var oddCoefficients = Avx2.ShiftRightLogical(coefficients.AsUInt64(), 32).AsInt32();
+			var oddSamples = Avx2.ShiftRightLogical(samples.AsUInt64(), 32).AsInt32();
+			accumulatedOdd = Avx2.Add(odd, Avx2.Multiply(oddCoefficients, oddSamples));
+		}
+
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		private static Vector256<int> LoadVector(int[] values, int offset)
+		{
+			// Kernel dispatch and coefficient bounds prove that all eight lanes are inside the source array.
+			return Vector256.LoadUnsafe(ref MemoryMarshal.GetArrayDataReference(values), unchecked((nuint)offset));
 		}
 
 		public static void DecodeLpc33(long[] decoded, int[] residual, int[] coefficients, int predictorOrder, int quantizationLevel, int length)

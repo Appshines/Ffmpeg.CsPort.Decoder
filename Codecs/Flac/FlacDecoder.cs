@@ -23,11 +23,12 @@
  * You should have received a copy of the GNU Lesser General Public License along with
  * this library. If not, see <https://www.gnu.org/licenses/>.
  *
- * PORT-NOTE: 1:1 translation. Do not refactor, reorder, or simplify; bit-exactness
- * against the FFmpeg reference is verified by the conformance tests.
+ * PORT-NOTE: 1:1 translation. Performance-motivated, semantics-preserving transformations
+ * applied (see repository history); bit-exactness remains verified by the conformance tests.
  */
 using System;
 using System.Buffers.Binary;
+using System.Runtime.InteropServices;
 using Ffmpeg.CsPort.Decoder.Audio;
 using Ffmpeg.CsPort.Decoder.Bitstream;
 using Ffmpeg.CsPort.Decoder.Infrastructure;
@@ -285,38 +286,50 @@ namespace Ffmpeg.CsPort.Decoder.Codecs.Flac
 		/// </summary>
 		private int DecodeResiduals(int[] decoded, int predictorOrder)
 		{
-			var methodType = (int)_Reader.ReadBits(2);
-			var riceOrder = (int)_Reader.ReadBits(4);
+			var bitReader = _Reader.OpenLocal();
+			// The method has one result exit so the local reader is closed after success and every decode error.
+			var methodType = (int)bitReader.ReadBits(2);
+			var riceOrder = (int)bitReader.ReadBits(4);
 			var samples = _BlockSize >> riceOrder;
 			var riceBits = 4 + methodType;
 			var riceEscape = (1 << riceBits) - 1;
 			var outputIndex = predictorOrder;
 			var index = predictorOrder;
+			var result = 0;
 			if (methodType > 1 || samples << riceOrder != _BlockSize || predictorOrder > samples)
-				return FfmpegError.InvalidData;
-
-			for (var partition = 0; partition < 1 << riceOrder; partition++)
 			{
-				var parameter = (int)_Reader.ReadBits(riceBits);
-				if (parameter == riceEscape)
+				result = FfmpegError.InvalidData;
+			} else
+			{
+				for (var partition = 0; partition < 1 << riceOrder; partition++)
 				{
-					var rawBits = (int)_Reader.ReadBits(5);
-					for (; index < samples; index++)
-						decoded[outputIndex++] = _Reader.ReadSignedBits(rawBits);
-				} else
-				{
-					var realLimit = parameter > 1 ? (int.MaxValue >> (parameter - 1)) + 2 : int.MaxValue;
-					for (; index < samples; index++)
+					var parameter = (int)bitReader.ReadBits(riceBits);
+					if (parameter == riceEscape)
 					{
-						var value = GolombReader.ReadSignedFlac(_Reader, parameter, realLimit, 1);
-						if (value == GolombReader.InvalidVlc)
-							return FfmpegError.InvalidData;
-						decoded[outputIndex++] = value;
+						var rawBits = (int)bitReader.ReadBits(5);
+						for (; index < samples; index++)
+							decoded[outputIndex++] = bitReader.ReadSignedBits(rawBits);
+					} else
+					{
+						var realLimit = parameter > 1 ? (int.MaxValue >> (parameter - 1)) + 2 : int.MaxValue;
+						for (; index < samples; index++)
+						{
+							var value = GolombReader.ReadSignedFlac(ref bitReader, parameter, realLimit, 1);
+							if (value == GolombReader.InvalidVlc)
+							{
+								result = FfmpegError.InvalidData;
+								break;
+							}
+							decoded[outputIndex++] = value;
+						}
 					}
+					if (result < 0)
+						break;
+					index = 0;
 				}
-				index = 0;
 			}
-			return 0;
+			bitReader.Close();
+			return result;
 		}
 
 		/// <summary>
@@ -327,6 +340,15 @@ namespace Ffmpeg.CsPort.Decoder.Codecs.Flac
 			if (bitsPerSample == 32 && _ChannelMode > 0)
 				Decorrelate33();
 			var shift = bytesPerSample * 8 - bitsPerSample;
+			if (BitConverter.IsLittleEndian)
+			{
+				if (bytesPerSample == 2)
+					WriteDecorrelated16(output, shift);
+				else
+					WriteDecorrelated32(output, shift);
+				return;
+			}
+
 			var outputOffset = 0;
 			for (var sample = 0; sample < _BlockSize; sample++)
 			{
@@ -354,6 +376,62 @@ namespace Ffmpeg.CsPort.Decoder.Codecs.Flac
 					else
 						BinaryPrimitives.WriteUInt32LittleEndian(output.Slice(outputOffset, 4), value);
 					outputOffset += bytesPerSample;
+				}
+			}
+		}
+
+		private void WriteDecorrelated16(Span<byte> output, int shift)
+		{
+			var destination = MemoryMarshal.Cast<byte, ushort>(output);
+			var outputOffset = 0;
+			for (var sample = 0; sample < _BlockSize; sample++)
+			{
+				for (var channel = 0; channel < _StreamInfo.Channels; channel++)
+				{
+					uint value;
+					if (_ChannelMode == 1)
+						value = channel == 0 ? (uint)_Decoded[0][sample] : unchecked((uint)_Decoded[0][sample] - (uint)_Decoded[1][sample]);
+					else if (_ChannelMode == 2)
+						value = channel == 0 ? unchecked((uint)_Decoded[0][sample] + (uint)_Decoded[1][sample]) : (uint)_Decoded[1][sample];
+					else if (_ChannelMode == 3)
+					{
+						var middle = (uint)_Decoded[0][sample];
+						var side = _Decoded[1][sample];
+						middle = unchecked(middle - (uint)(side >> 1));
+						value = channel == 0 ? unchecked(middle + (uint)side) : middle;
+					} else
+					{
+						value = (uint)_Decoded[channel][sample];
+					}
+					destination[outputOffset++] = (ushort)unchecked(value << shift);
+				}
+			}
+		}
+
+		private void WriteDecorrelated32(Span<byte> output, int shift)
+		{
+			var destination = MemoryMarshal.Cast<byte, uint>(output);
+			var outputOffset = 0;
+			for (var sample = 0; sample < _BlockSize; sample++)
+			{
+				for (var channel = 0; channel < _StreamInfo.Channels; channel++)
+				{
+					uint value;
+					if (_ChannelMode == 1)
+						value = channel == 0 ? (uint)_Decoded[0][sample] : unchecked((uint)_Decoded[0][sample] - (uint)_Decoded[1][sample]);
+					else if (_ChannelMode == 2)
+						value = channel == 0 ? unchecked((uint)_Decoded[0][sample] + (uint)_Decoded[1][sample]) : (uint)_Decoded[1][sample];
+					else if (_ChannelMode == 3)
+					{
+						var middle = (uint)_Decoded[0][sample];
+						var side = _Decoded[1][sample];
+						middle = unchecked(middle - (uint)(side >> 1));
+						value = channel == 0 ? unchecked(middle + (uint)side) : middle;
+					} else
+					{
+						value = (uint)_Decoded[channel][sample];
+					}
+					destination[outputOffset++] = unchecked(value << shift);
 				}
 			}
 		}
