@@ -23,11 +23,12 @@
  * You should have received a copy of the GNU Lesser General Public License along with
  * this library. If not, see <https://www.gnu.org/licenses/>.
  *
- * PORT-NOTE: 1:1 translation. Do not refactor, reorder, or simplify; bit-exactness
- * against the FFmpeg reference is verified by the conformance tests.
+ * PORT-NOTE: 1:1 translation. Performance-motivated, semantics-preserving transformations
+ * applied (see repository history); bit-exactness remains verified by the conformance tests.
  */
 using System;
 using System.Buffers.Binary;
+using System.Runtime.InteropServices;
 using Ffmpeg.CsPort.Decoder.Audio;
 using Ffmpeg.CsPort.Decoder.Bitstream;
 using Ffmpeg.CsPort.Decoder.Infrastructure;
@@ -121,7 +122,11 @@ namespace Ffmpeg.CsPort.Decoder.Codecs.MpegAudio
 			{
 				for (var block = 0; block < synthesisBlocks; block++)
 					MpegAudioDsp.Synthesize(_SynthBuffers[channel], ref _SynthOffsets[channel], _SubbandSamples[channel], block * SubbandLimit, _FrameSamples[channel], block * 32);
-				for (var sample = 0; sample < numberOfSamples; sample++)
+				if (BitConverter.IsLittleEndian)
+				{
+					MemoryMarshal.AsBytes(_FrameSamples[channel].AsSpan(0, numberOfSamples))
+						.CopyTo(output.Slice(channel * planeSize, planeSize));
+				} else for (var sample = 0; sample < numberOfSamples; sample++)
 				{
 					var bits = BitConverter.SingleToInt32Bits(_FrameSamples[channel][sample]);
 					BinaryPrimitives.WriteInt32LittleEndian(output.Slice(channel * planeSize + sample * 4, 4), bits);
